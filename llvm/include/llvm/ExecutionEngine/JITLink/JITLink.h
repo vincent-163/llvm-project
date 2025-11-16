@@ -1311,13 +1311,10 @@ public:
                             orc::ExecutorAddr Address,
                             orc::ExecutorAddrDiff Size, Linkage L, Scope S,
                             bool IsLive) {
-    assert((S == Scope::Local || llvm::none_of(AbsoluteSymbols,
-                                               [&](const Symbol *Sym) {
-                                                 return Sym->getName() == Name;
-                                               })) &&
-           "Duplicate absolute symbol");
     auto &Sym = Symbol::constructAbsolute(Allocator, createAddressable(Address),
                                           std::move(Name), Size, L, S, IsLive);
+    assert((S == Scope::Local || !AbsoluteSymbols.count(&Sym)) &&
+           "Duplicate absolute symbol");
     AbsoluteSymbols.insert(&Sym);
     return Sym;
   }
@@ -1351,14 +1348,14 @@ public:
                            orc::SymbolStringPtr Name,
                            orc::ExecutorAddrDiff Size, Linkage L, Scope S,
                            bool IsCallable, bool IsLive) {
-    assert((S == Scope::Local || llvm::none_of(defined_symbols(),
-                                               [&](const Symbol *Sym) {
-                                                 return Sym->getName() == Name;
-                                               })) &&
-           "Duplicate defined symbol");
     auto &Sym =
         Symbol::constructNamedDef(Allocator, Content, Offset, std::move(Name),
                                   Size, L, S, IsLive, IsCallable);
+    assert((S == Scope::Local || llvm::none_of(sections(),
+                                               [&](Section &Sec) {
+                                                return Sec.Symbols.count(&Sym);
+                                               })) &&
+           "Duplicate defined symbol");
     Content.getSection().addSymbol(Sym);
     return Sym;
   }
