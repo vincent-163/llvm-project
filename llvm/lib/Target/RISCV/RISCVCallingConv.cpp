@@ -356,9 +356,11 @@ bool llvm::CC_RISCV(unsigned ValNo, MVT ValVT, MVT LocVT,
     }
   }
 
-  // Any return value split in to more than two values can't be returned
-  // directly. Vectors are returned via the available vector registers.
-  if (!LocVT.isVector() && IsRet && ValNo > 1)
+  // Any return value split into more than two values can't be returned
+  // directly, except for PreserveNone which allows using many registers.
+  // Vectors are returned via the available vector registers.
+  if (!LocVT.isVector() && IsRet && ValNo > 1 &&
+      State.getCallingConv() != CallingConv::PreserveNone)
     return true;
 
   // UseGPRForF16_F32 if targeting one of the soft-float ABIs, if passing a
@@ -618,6 +620,151 @@ bool llvm::CC_RISCV(unsigned ValNo, MVT ValVT, MVT LocVT,
 
 // FastCC has less than 1% performance improvement for some particular
 // benchmark. But theoretically, it may have benefit for some cases.
+// PreserveNone: like FastCC but with a wider register pool including all non-reserved GPRs
+static ArrayRef<MCPhysReg> getPN_GPRs() {
+  static const MCPhysReg PNGPRs[] = {
+      // X5-X7 (t0-t2)
+      RISCV::X5, RISCV::X6, RISCV::X7,
+      // X9 (s1)
+      RISCV::X9,
+      // X10-X17 (a0-a7)
+      RISCV::X10, RISCV::X11, RISCV::X12, RISCV::X13, RISCV::X14, RISCV::X15, RISCV::X16, RISCV::X17,
+      // X18-X27 (s2-s11)
+      RISCV::X18, RISCV::X19, RISCV::X20, RISCV::X21, RISCV::X22, RISCV::X23, RISCV::X24, RISCV::X25, RISCV::X26, RISCV::X27,
+      // X28-X31 (t3-t6)
+      RISCV::X28, RISCV::X29, RISCV::X30, RISCV::X31};
+  return ArrayRef(PNGPRs);
+}
+static ArrayRef<MCPhysReg> getPN_GPRF16s() {
+  static const MCPhysReg PNGPRsH[] = {
+      RISCV::X5_H, RISCV::X6_H, RISCV::X7_H, RISCV::X9_H,
+      RISCV::X10_H, RISCV::X11_H, RISCV::X12_H, RISCV::X13_H,
+      RISCV::X14_H, RISCV::X15_H, RISCV::X16_H, RISCV::X17_H,
+      RISCV::X18_H, RISCV::X19_H, RISCV::X20_H, RISCV::X21_H,
+      RISCV::X22_H, RISCV::X23_H, RISCV::X24_H, RISCV::X25_H,
+      RISCV::X26_H, RISCV::X27_H, RISCV::X28_H, RISCV::X29_H,
+      RISCV::X30_H, RISCV::X31_H};
+  return ArrayRef(PNGPRsH);
+}
+static ArrayRef<MCPhysReg> getPN_GPRF32s() {
+  static const MCPhysReg PNGPRsW[] = {
+      RISCV::X5_W, RISCV::X6_W, RISCV::X7_W, RISCV::X9_W,
+      RISCV::X10_W, RISCV::X11_W, RISCV::X12_W, RISCV::X13_W,
+      RISCV::X14_W, RISCV::X15_W, RISCV::X16_W, RISCV::X17_W,
+      RISCV::X18_W, RISCV::X19_W, RISCV::X20_W, RISCV::X21_W,
+      RISCV::X22_W, RISCV::X23_W, RISCV::X24_W, RISCV::X25_W,
+      RISCV::X26_W, RISCV::X27_W, RISCV::X28_W, RISCV::X29_W,
+      RISCV::X30_W, RISCV::X31_W};
+  return ArrayRef(PNGPRsW);
+}
+
+bool llvm::CC_RISCV_PreserveNone(unsigned ValNo, MVT ValVT, MVT LocVT,
+                           CCValAssign::LocInfo LocInfo,
+                           ISD::ArgFlagsTy ArgFlags, CCState &State,
+                           bool IsFixed, bool IsRet, Type *OrigTy) {
+  // Use FastCC logic but with PN register pools and without the 2-return limit
+  const MachineFunction &MF = State.getMachineFunction();
+  const RISCVSubtarget &Subtarget = MF.getSubtarget<RISCVSubtarget>();
+  const RISCVTargetLowering &TLI = *Subtarget.getTargetLowering();
+
+  // Handle FP regs first
+  if ((LocVT == MVT::f16 && Subtarget.hasStdExtZfhmin()) ||
+      (LocVT == MVT::bf16 && Subtarget.hasStdExtZfbfmin())) {
+    static const MCPhysReg FPR16All[] = { RISCV::F0_H, RISCV::F1_H, RISCV::F2_H, RISCV::F3_H,
+      RISCV::F4_H, RISCV::F5_H, RISCV::F6_H, RISCV::F7_H,
+      RISCV::F8_H, RISCV::F9_H, RISCV::F10_H, RISCV::F11_H, RISCV::F12_H, RISCV::F13_H, RISCV::F14_H, RISCV::F15_H,
+      RISCV::F16_H, RISCV::F17_H, RISCV::F18_H, RISCV::F19_H, RISCV::F20_H, RISCV::F21_H, RISCV::F22_H, RISCV::F23_H,
+      RISCV::F24_H, RISCV::F25_H, RISCV::F26_H, RISCV::F27_H, RISCV::F28_H, RISCV::F29_H, RISCV::F30_H, RISCV::F31_H };
+    if (MCRegister Reg = State.AllocateReg(ArrayRef(FPR16All))) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return false;
+    }
+  }
+  if (LocVT == MVT::f32 && (Subtarget.hasStdExtF() || Subtarget.hasStdExtZfinx())) {
+    static const MCPhysReg FPR32All[] = { RISCV::F0_F, RISCV::F1_F, RISCV::F2_F, RISCV::F3_F,
+      RISCV::F4_F, RISCV::F5_F, RISCV::F6_F, RISCV::F7_F,
+      RISCV::F8_F, RISCV::F9_F, RISCV::F10_F, RISCV::F11_F, RISCV::F12_F, RISCV::F13_F, RISCV::F14_F, RISCV::F15_F,
+      RISCV::F16_F, RISCV::F17_F, RISCV::F18_F, RISCV::F19_F, RISCV::F20_F, RISCV::F21_F, RISCV::F22_F, RISCV::F23_F,
+      RISCV::F24_F, RISCV::F25_F, RISCV::F26_F, RISCV::F27_F, RISCV::F28_F, RISCV::F29_F, RISCV::F30_F, RISCV::F31_F };
+    if (MCRegister Reg = State.AllocateReg(ArrayRef(FPR32All))) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return false;
+    }
+  }
+  if (LocVT == MVT::f64 && (Subtarget.hasStdExtD() || Subtarget.hasStdExtZdinx())) {
+    static const MCPhysReg FPR64All[] = { RISCV::F0_D, RISCV::F1_D, RISCV::F2_D, RISCV::F3_D,
+      RISCV::F4_D, RISCV::F5_D, RISCV::F6_D, RISCV::F7_D,
+      RISCV::F8_D, RISCV::F9_D, RISCV::F10_D, RISCV::F11_D, RISCV::F12_D, RISCV::F13_D, RISCV::F14_D, RISCV::F15_D,
+      RISCV::F16_D, RISCV::F17_D, RISCV::F18_D, RISCV::F19_D, RISCV::F20_D, RISCV::F21_D, RISCV::F22_D, RISCV::F23_D,
+      RISCV::F24_D, RISCV::F25_D, RISCV::F26_D, RISCV::F27_D, RISCV::F28_D, RISCV::F29_D, RISCV::F30_D, RISCV::F31_D };
+    if (MCRegister Reg = State.AllocateReg(ArrayRef(FPR64All))) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return false;
+    }
+  }
+
+  MVT XLenVT = Subtarget.getXLenVT();
+  // Z*inx bitcast support, like FastCC
+  if ((LocVT == MVT::f16 && Subtarget.hasStdExtZhinxmin())) {
+    if (MCRegister Reg = State.AllocateReg(getPN_GPRF16s())) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return false;
+    }
+  }
+  if (LocVT == MVT::f32 && Subtarget.hasStdExtZfinx()) {
+    if (MCRegister Reg = State.AllocateReg(getPN_GPRF32s())) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return false;
+    }
+  }
+  if (LocVT == MVT::f64 && Subtarget.is64Bit() && Subtarget.hasStdExtZdinx()) {
+    if (MCRegister Reg = State.AllocateReg(getPN_GPRs())) {
+      if (LocVT.getSizeInBits() != Subtarget.getXLen()) {
+        LocVT = XLenVT;
+        State.addLoc(CCValAssign::getCustomReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+        return false;
+      }
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return false;
+    }
+  }
+
+  ArrayRef<MCPhysReg> ArgGPRs = getPN_GPRs();
+
+  if (LocVT.isVector()) {
+    if (MCRegister Reg = allocateRVVReg(ValVT, ValNo, State, TLI)) {
+      if (LocVT.isFixedLengthVector()) {
+        LocVT = TLI.getContainerForFixedLengthVector(LocVT);
+        State.addLoc(CCValAssign::getCustomReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+        return false;
+      }
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return false;
+    }
+    if (LocVT.isScalableVector() || State.getFirstUnallocated(ArgGPRs) != ArgGPRs.size()) {
+      LocInfo = CCValAssign::Indirect;
+      LocVT = XLenVT;
+    }
+  }
+
+  if (LocVT == XLenVT) {
+    if (MCRegister Reg = State.AllocateReg(ArgGPRs)) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return false;
+    }
+  }
+
+  if (LocVT == XLenVT || LocVT == MVT::f16 || LocVT == MVT::bf16 ||
+      LocVT == MVT::f32 || LocVT == MVT::f64 || LocVT.isFixedLengthVector()) {
+    Align StackAlign = MaybeAlign(ValVT.getScalarSizeInBits() / 8).valueOrOne();
+    int64_t Offset = State.AllocateStack(LocVT.getStoreSize(), StackAlign);
+    State.addLoc(CCValAssign::getMem(ValNo, ValVT, Offset, LocVT, LocInfo));
+    return false;
+  }
+
+  return true;
+}
+
 bool llvm::CC_RISCV_FastCC(unsigned ValNo, MVT ValVT, MVT LocVT,
                            CCValAssign::LocInfo LocInfo,
                            ISD::ArgFlagsTy ArgFlags, CCState &State,

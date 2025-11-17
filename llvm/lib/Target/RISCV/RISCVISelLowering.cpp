@@ -22237,6 +22237,7 @@ SDValue RISCVTargetLowering::LowerFormalArguments(
   case CallingConv::Fast:
   case CallingConv::SPIR_KERNEL:
   case CallingConv::PreserveMost:
+  case CallingConv::PreserveNone:
   case CallingConv::GRAAL:
   case CallingConv::RISCV_VectorCall:
 #define CC_VLS_CASE(ABI_VLEN) case CallingConv::RISCV_VLSCall_##ABI_VLEN:
@@ -22311,8 +22312,9 @@ SDValue RISCVTargetLowering::LowerFormalArguments(
     CCInfo.AnalyzeFormalArguments(Ins, CC_RISCV_GHC);
   else
     analyzeInputArgs(MF, CCInfo, Ins, /*IsRet=*/false,
-                     CallConv == CallingConv::Fast ? CC_RISCV_FastCC
-                                                   : CC_RISCV);
+                     (CallConv == CallingConv::Fast)
+                         ? CC_RISCV_FastCC
+                         : (CallConv == CallingConv::PreserveNone ? CC_RISCV_PreserveNone : CC_RISCV));
 
   for (unsigned i = 0, e = ArgLocs.size(), InsIdx = 0; i != e; ++i, ++InsIdx) {
     CCValAssign &VA = ArgLocs[i];
@@ -22821,8 +22823,10 @@ bool RISCVTargetLowering::CanLowerReturn(
   for (unsigned i = 0, e = Outs.size(); i != e; ++i) {
     MVT VT = Outs[i].VT;
     ISD::ArgFlagsTy ArgFlags = Outs[i].Flags;
-    if (CC_RISCV(i, VT, VT, CCValAssign::Full, ArgFlags, CCInfo,
-                 /*IsFixed=*/true, /*IsRet=*/true, nullptr))
+    if (((CallConv == CallingConv::Fast || CallConv == CallingConv::PreserveNone)
+             ? CC_RISCV_FastCC
+             : CC_RISCV)(i, VT, VT, CCValAssign::Full, ArgFlags, CCInfo,
+                        /*IsFixed=*/true, /*IsRet=*/true, nullptr))
       return false;
   }
   return true;
@@ -22845,7 +22849,10 @@ RISCVTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
                  *DAG.getContext());
 
   analyzeOutputArgs(DAG.getMachineFunction(), CCInfo, Outs, /*IsRet=*/true,
-                    nullptr, CC_RISCV);
+                    nullptr,
+                    (CallConv == CallingConv::Fast)
+                        ? CC_RISCV_FastCC
+                        : (CallConv == CallingConv::PreserveNone ? CC_RISCV_PreserveNone : CC_RISCV));
 
   if (CallConv == CallingConv::GHC && !RVLocs.empty())
     report_fatal_error("GHC functions return void only");

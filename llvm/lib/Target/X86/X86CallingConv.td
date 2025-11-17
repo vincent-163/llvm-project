@@ -378,6 +378,43 @@ def RetCC_X86_64_C : CallingConv<[
   CCDelegateTo<RetCC_X86Common>
 ]>;
 
+// X86-64 PreserveNone return-value convention: mirror argument GPR order.
+// Uses the same non-volatile-first GPR list as CC_X86_64_Preserve_None.
+// Other types (FP, vectors, small ints) fall back to the regular C return CC.
+def RetCC_X86_64_Preserve_None : CallingConv<[
+  // Pointers are always returned in full 64-bit registers.
+  CCIfPtr<CCCustom<"CC_X86_64_Pointer">>,
+
+  // Integer returns use the same register order as arguments.
+  CCIfType<[i8],  CCAssignToReg<[R12B, R13B, R14B, R15B, DIL, SIL,
+                                 DL, CL, R8B, R9B, R11B, AL]>>,
+  CCIfType<[i16], CCAssignToReg<[R12W, R13W, R14W, R15W, DI,  SI,
+                                 DX, CX, R8W, R9W, R11W, AX]>>,
+  CCIfType<[i32], CCAssignToReg<[R12D, R13D, R14D, R15D, EDI, ESI,
+                                 EDX, ECX, R8D, R9D, R11D, EAX]>>,
+  CCIfType<[i64], CCAssignToReg<[R12,  R13,  R14,  R15,  RDI, RSI,
+                                 RDX,  RCX,  R8,   R9,   R11, RAX]>>,
+
+  // FP returns: use XMM0..XMM15 (and fall back as needed)
+  CCIfType<[f32, f64, f128], CCAssignToReg<[
+    XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+    XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15]>>,
+
+  // Vector returns: map to YMM/ZMM where appropriate, otherwise XMM
+  CCIfType<[v8f32, v4f64, v8i32, v4i64], CCAssignToReg<[
+    YMM0, YMM1, YMM2, YMM3, YMM4, YMM5, YMM6, YMM7,
+    YMM8, YMM9, YMM10, YMM11, YMM12, YMM13, YMM14, YMM15]>>,
+  CCIfType<[v16f32, v8f64, v16i32, v8i64], CCAssignToReg<[
+    ZMM0, ZMM1, ZMM2, ZMM3, ZMM4, ZMM5, ZMM6, ZMM7,
+    ZMM8, ZMM9, ZMM10, ZMM11, ZMM12, ZMM13, ZMM14, ZMM15]>>,
+  CCIfType<[v4f32, v2f64, v4i32, v2i64], CCAssignToReg<[
+    XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+    XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15]>>,
+
+  // Otherwise, use the regular X86-64 C return convention.
+  CCDelegateTo<RetCC_X86_64_C>
+]>;
+
 // X86-Win64 C return-value convention.
 def RetCC_X86_Win64_C : CallingConv<[
   // GCC returns FP values in RAX on Win64.
@@ -493,7 +530,10 @@ def RetCC_X86_64 : CallingConv<[
           CCIfSubtarget<"isTargetWin64()",
                         CCDelegateTo<RetCC_X86_Win64_RegCall>>>,
   CCIfCC<"CallingConv::X86_RegCall", CCDelegateTo<RetCC_X86_SysV64_RegCall>>,
-          
+
+  // PreserveNone: mirror arg GPR order for returns
+  CCIfCC<"CallingConv::PreserveNone", CCDelegateTo<RetCC_X86_64_Preserve_None>>,
+
   // Mingw64 and native Win64 use Win64 CC
   CCIfSubtarget<"isTargetWin64()", CCDelegateTo<RetCC_X86_Win64_C>>,
 

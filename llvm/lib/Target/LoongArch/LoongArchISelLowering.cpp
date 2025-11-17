@@ -6635,6 +6635,57 @@ const char *LoongArchTargetLowering::getTargetNodeName(unsigned Opcode) const {
 const MCPhysReg ArgGPRs[] = {LoongArch::R4,  LoongArch::R5, LoongArch::R6,
                              LoongArch::R7,  LoongArch::R8, LoongArch::R9,
                              LoongArch::R10, LoongArch::R11};
+
+// PreserveNone register pools: use all non-reserved GPRs and all FP/Vector regs
+static const MCPhysReg PN_GPRs[] = {
+  // GPRs excluding R0(zero), R1(ra), R2(tp), R3(sp), R21(non-alloc), R22(fp)
+  LoongArch::R4, LoongArch::R5, LoongArch::R6, LoongArch::R7, LoongArch::R8,
+  LoongArch::R9, LoongArch::R10, LoongArch::R11, LoongArch::R12, LoongArch::R13,
+  LoongArch::R14, LoongArch::R15, LoongArch::R16, LoongArch::R17, LoongArch::R18,
+  LoongArch::R19, LoongArch::R20, LoongArch::R23, LoongArch::R24, LoongArch::R25,
+  LoongArch::R26, LoongArch::R27, LoongArch::R28, LoongArch::R29, LoongArch::R30,
+  LoongArch::R31
+};
+static const MCPhysReg PN_FPR32s[] = {
+  LoongArch::F0,  LoongArch::F1,  LoongArch::F2,  LoongArch::F3,
+  LoongArch::F4,  LoongArch::F5,  LoongArch::F6,  LoongArch::F7,
+  LoongArch::F8,  LoongArch::F9,  LoongArch::F10, LoongArch::F11,
+  LoongArch::F12, LoongArch::F13, LoongArch::F14, LoongArch::F15,
+  LoongArch::F16, LoongArch::F17, LoongArch::F18, LoongArch::F19,
+  LoongArch::F20, LoongArch::F21, LoongArch::F22, LoongArch::F23,
+  LoongArch::F24, LoongArch::F25, LoongArch::F26, LoongArch::F27,
+  LoongArch::F28, LoongArch::F29, LoongArch::F30, LoongArch::F31
+};
+static const MCPhysReg PN_FPR64s[] = {
+  LoongArch::F0_64,  LoongArch::F1_64,  LoongArch::F2_64,  LoongArch::F3_64,
+  LoongArch::F4_64,  LoongArch::F5_64,  LoongArch::F6_64,  LoongArch::F7_64,
+  LoongArch::F8_64,  LoongArch::F9_64,  LoongArch::F10_64, LoongArch::F11_64,
+  LoongArch::F12_64, LoongArch::F13_64, LoongArch::F14_64, LoongArch::F15_64,
+  LoongArch::F16_64, LoongArch::F17_64, LoongArch::F18_64, LoongArch::F19_64,
+  LoongArch::F20_64, LoongArch::F21_64, LoongArch::F22_64, LoongArch::F23_64,
+  LoongArch::F24_64, LoongArch::F25_64, LoongArch::F26_64, LoongArch::F27_64,
+  LoongArch::F28_64, LoongArch::F29_64, LoongArch::F30_64, LoongArch::F31_64
+};
+static const MCPhysReg PN_VRs[] = {
+  LoongArch::VR0,  LoongArch::VR1,  LoongArch::VR2,  LoongArch::VR3,
+  LoongArch::VR4,  LoongArch::VR5,  LoongArch::VR6,  LoongArch::VR7,
+  LoongArch::VR8,  LoongArch::VR9,  LoongArch::VR10, LoongArch::VR11,
+  LoongArch::VR12, LoongArch::VR13, LoongArch::VR14, LoongArch::VR15,
+  LoongArch::VR16, LoongArch::VR17, LoongArch::VR18, LoongArch::VR19,
+  LoongArch::VR20, LoongArch::VR21, LoongArch::VR22, LoongArch::VR23,
+  LoongArch::VR24, LoongArch::VR25, LoongArch::VR26, LoongArch::VR27,
+  LoongArch::VR28, LoongArch::VR29, LoongArch::VR30, LoongArch::VR31
+};
+static const MCPhysReg PN_XRs[] = {
+  LoongArch::XR0,  LoongArch::XR1,  LoongArch::XR2,  LoongArch::XR3,
+  LoongArch::XR4,  LoongArch::XR5,  LoongArch::XR6,  LoongArch::XR7,
+  LoongArch::XR8,  LoongArch::XR9,  LoongArch::XR10, LoongArch::XR11,
+  LoongArch::XR12, LoongArch::XR13, LoongArch::XR14, LoongArch::XR15,
+  LoongArch::XR16, LoongArch::XR17, LoongArch::XR18, LoongArch::XR19,
+  LoongArch::XR20, LoongArch::XR21, LoongArch::XR22, LoongArch::XR23,
+  LoongArch::XR24, LoongArch::XR25, LoongArch::XR26, LoongArch::XR27,
+  LoongArch::XR28, LoongArch::XR29, LoongArch::XR30, LoongArch::XR31
+};
 // Eight floating-point registers fa0-fa7 used for passing floating-point
 // arguments, and fa0-fa1 are also used to return values.
 const MCPhysReg ArgFPR32s[] = {LoongArch::F0, LoongArch::F1, LoongArch::F2,
@@ -6702,8 +6753,8 @@ static bool CC_LoongArch(const DataLayout &DL, LoongArchABI::ABI ABI,
   MVT LocVT = ValVT;
 
   // Any return value split into more than two values can't be returned
-  // directly.
-  if (IsRet && ValNo > 1)
+  // directly, except for PreserveNone which allows many registers.
+  if (IsRet && ValNo > 1 && State.getCallingConv() != CallingConv::PreserveNone)
     return true;
 
   // If passing a variadic argument, or if no FPR is available.
@@ -6818,16 +6869,29 @@ static bool CC_LoongArch(const DataLayout &DL, LoongArchABI::ABI ABI,
   unsigned StoreSizeBytes = GRLen / 8;
   Align StackAlign = Align(GRLen / 8);
 
-  if (ValVT == MVT::f32 && !UseGPRForFloat)
-    Reg = State.AllocateReg(ArgFPR32s);
-  else if (ValVT == MVT::f64 && !UseGPRForFloat)
-    Reg = State.AllocateReg(ArgFPR64s);
-  else if (ValVT.is128BitVector())
-    Reg = State.AllocateReg(ArgVRs);
-  else if (ValVT.is256BitVector())
-    Reg = State.AllocateReg(ArgXRs);
-  else
-    Reg = State.AllocateReg(ArgGPRs);
+  if (State.getCallingConv() == CallingConv::PreserveNone) {
+    if (ValVT == MVT::f32)
+      Reg = State.AllocateReg(PN_FPR32s);
+    else if (ValVT == MVT::f64)
+      Reg = State.AllocateReg(PN_FPR64s);
+    else if (ValVT.is128BitVector())
+      Reg = State.AllocateReg(PN_VRs);
+    else if (ValVT.is256BitVector())
+      Reg = State.AllocateReg(PN_XRs);
+    else
+      Reg = State.AllocateReg(PN_GPRs);
+  } else {
+    if (ValVT == MVT::f32 && !UseGPRForFloat)
+      Reg = State.AllocateReg(ArgFPR32s);
+    else if (ValVT == MVT::f64 && !UseGPRForFloat)
+      Reg = State.AllocateReg(ArgFPR64s);
+    else if (ValVT.is128BitVector())
+      Reg = State.AllocateReg(ArgVRs);
+    else if (ValVT.is256BitVector())
+      Reg = State.AllocateReg(ArgXRs);
+    else
+      Reg = State.AllocateReg(ArgGPRs);
+  }
 
   unsigned StackOffset =
       Reg ? 0 : State.AllocateStack(StoreSizeBytes, StackAlign);
@@ -7091,6 +7155,7 @@ SDValue LoongArchTargetLowering::LowerFormalArguments(
     llvm_unreachable("Unsupported calling convention");
   case CallingConv::C:
   case CallingConv::Fast:
+  case CallingConv::PreserveNone:
     break;
   case CallingConv::GHC:
     if (!MF.getSubtarget().hasFeature(LoongArch::FeatureBasicF) ||
@@ -7112,7 +7177,7 @@ SDValue LoongArchTargetLowering::LowerFormalArguments(
   if (CallConv == CallingConv::GHC)
     CCInfo.AnalyzeFormalArguments(Ins, CC_LoongArch_GHC);
   else
-    analyzeInputArgs(MF, CCInfo, Ins, /*IsRet=*/false, CC_LoongArch);
+    analyzeInputArgs(MF, CCInfo, Ins, /*IsRet=*/false, CC_LoongArch); // PN uses same analysis path; pool chosen in CC fn.
 
   for (unsigned i = 0, e = ArgLocs.size(), InsIdx = 0; i != e; ++i, ++InsIdx) {
     CCValAssign &VA = ArgLocs[i];
