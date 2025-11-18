@@ -419,7 +419,7 @@ bool RISCVCallLowering::lowerReturn(MachineIRBuilder &MIRBuilder,
     splitToValueTypes(OrigRetInfo, SplitRetInfos, DL, CC);
 
     RISCVOutgoingValueAssigner Assigner(
-        CC == CallingConv::Fast ? CC_RISCV_FastCC : CC_RISCV,
+        (CC == CallingConv::Fast) ? CC_RISCV_FastCC : (CC == CallingConv::PreserveNone ? CC_RISCV_PreserveNone : CC_RISCV),
         /*IsRet=*/true);
     RISCVOutgoingValueHandler Handler(MIRBuilder, MF.getRegInfo(), Ret);
     if (!determineAndHandleAssignments(Handler, Assigner, SplitRetInfos,
@@ -657,7 +657,7 @@ bool RISCVCallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
     splitToValueTypes(Info.OrigRet, SplitRetInfos, DL, CC);
 
     RISCVIncomingValueAssigner RetAssigner(
-        CC == CallingConv::Fast ? CC_RISCV_FastCC : CC_RISCV,
+        (CC == CallingConv::Fast) ? CC_RISCV_FastCC : (CC == CallingConv::PreserveNone ? CC_RISCV_PreserveNone : CC_RISCV),
         /*IsRet=*/true);
     RISCVCallReturnHandler RetHandler(MIRBuilder, MF.getRegInfo(), Call);
     if (!determineAndHandleAssignments(RetHandler, RetAssigner, SplitRetInfos,

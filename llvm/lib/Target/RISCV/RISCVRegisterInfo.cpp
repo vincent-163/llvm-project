@@ -68,6 +68,8 @@ RISCVRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   auto &Subtarget = MF->getSubtarget<RISCVSubtarget>();
   if (MF->getFunction().getCallingConv() == CallingConv::GHC)
     return CSR_NoRegs_SaveList;
+  if (MF->getFunction().getCallingConv() == CallingConv::PreserveNone)
+    return CSR_NoRegs_SaveList;
   if (MF->getFunction().getCallingConv() == CallingConv::PreserveMost)
     return Subtarget.hasStdExtE() ? CSR_RT_MostRegs_RVE_SaveList
                                   : CSR_RT_MostRegs_SaveList;
@@ -813,6 +815,8 @@ RISCVRegisterInfo::getCallPreservedMask(const MachineFunction & MF,
   auto &Subtarget = MF.getSubtarget<RISCVSubtarget>();
 
   if (CC == CallingConv::GHC)
+    return CSR_NoRegs_RegMask;
+  if (CC == CallingConv::PreserveNone)
     return CSR_NoRegs_RegMask;
   RISCVABI::ABI ABI = Subtarget.getTargetABI();
   if (CC == CallingConv::PreserveMost) {

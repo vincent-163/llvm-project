@@ -31,6 +31,11 @@ bool CC_RISCV_FastCC(unsigned ValNo, MVT ValVT, MVT LocVT,
                      CCValAssign::LocInfo LocInfo, ISD::ArgFlagsTy ArgFlags,
                      CCState &State, bool IsFixed, bool IsRet, Type *OrigTy);
 
+// PreserveNone: maximize register usage for args/returns using all non-reserved regs
+bool CC_RISCV_PreserveNone(unsigned ValNo, MVT ValVT, MVT LocVT,
+                           CCValAssign::LocInfo LocInfo, ISD::ArgFlagsTy ArgFlags,
+                           CCState &State, bool IsFixed, bool IsRet, Type *OrigTy);
+
 bool CC_RISCV_GHC(unsigned ValNo, MVT ValVT, MVT LocVT,
                   CCValAssign::LocInfo LocInfo, ISD::ArgFlagsTy ArgFlags,
                   CCState &State);
