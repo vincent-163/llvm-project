@@ -1599,7 +1599,7 @@ def : Pat<(loongarch_call tglobaladdr:$func), (PseudoCALL tglobaladdr:$func)>;
 def : Pat<(loongarch_call texternalsym:$func), (PseudoCALL texternalsym:$func)>;
 
 // Function call with 'Medium' code model.
-let isCall = 1, Defs = [R1, R20], Size = 8 in
+let isCall = 1, Defs = [R1], Size = 8 in
 def PseudoCALL_MEDIUM : Pseudo<(outs), (ins bare_symbol:$func)>;
 
 let Predicates = [IsLA64] in {
