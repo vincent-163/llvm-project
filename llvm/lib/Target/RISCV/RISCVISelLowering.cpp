@@ -22522,6 +22522,7 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   } else
     analyzeOutputArgs(MF, ArgCCInfo, Outs, /*IsRet=*/false, &CLI,
                       CallConv == CallingConv::Fast ? CC_RISCV_FastCC
+                    : CallConv == CallingConv::PreserveNone ? CC_RISCV_PreserveNone
                                                     : CC_RISCV);
 
   // Check if it's really possible to do a tail call.

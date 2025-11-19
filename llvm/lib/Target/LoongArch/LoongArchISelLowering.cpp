@@ -6639,12 +6639,21 @@ const MCPhysReg ArgGPRs[] = {LoongArch::R4,  LoongArch::R5, LoongArch::R6,
 // PreserveNone register pools: use all non-reserved GPRs and all FP/Vector regs
 static const MCPhysReg PN_GPRs[] = {
   // GPRs excluding R0(zero), R1(ra), R2(tp), R3(sp), R21(non-alloc), R22(fp)
+  // Use regular CSRs first, then argument registers and finally temporaries.
+  // The problem is that regular indirect tail calls require a dedicated register
+  // for storing jump target, and in order to fit calling convention, the register
+  // must not be a callee-saved register. The set of possible registers is defined
+  // as GPRT in LoongArchRegisterInfo.td. However, while GPRT is designed for default
+  // calling convention and excludes R23-31, the same set of GPRT is used for all
+  // calling conventions. Hence we should prefer to leave some argument registers
+  // for performing tail calls.
+  LoongArch::R23, LoongArch::R24, LoongArch::R25,
+  LoongArch::R26, LoongArch::R27, LoongArch::R28, LoongArch::R29, LoongArch::R30,
+  LoongArch::R31,
   LoongArch::R4, LoongArch::R5, LoongArch::R6, LoongArch::R7, LoongArch::R8,
   LoongArch::R9, LoongArch::R10, LoongArch::R11, LoongArch::R12, LoongArch::R13,
   LoongArch::R14, LoongArch::R15, LoongArch::R16, LoongArch::R17, LoongArch::R18,
-  LoongArch::R19, LoongArch::R20, LoongArch::R23, LoongArch::R24, LoongArch::R25,
-  LoongArch::R26, LoongArch::R27, LoongArch::R28, LoongArch::R29, LoongArch::R30,
-  LoongArch::R31
+  LoongArch::R19, LoongArch::R20,
 };
 static const MCPhysReg PN_FPR32s[] = {
   LoongArch::F0,  LoongArch::F1,  LoongArch::F2,  LoongArch::F3,
