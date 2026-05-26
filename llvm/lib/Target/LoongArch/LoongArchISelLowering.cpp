@@ -6499,8 +6499,12 @@ MachineBasicBlock *LoongArchTargetLowering::EmitInstrWithCustomInserter(
                       LoongArch::R1, /*isDef*/ true,
                       /*isImp*/ true, /*isKill*/ false, /*isDead*/ true,
                       /*isUndef*/ false, /*isEarlyClobber*/ true));
+    [[fallthrough]];
+  case TargetOpcode::STACKMAP:
+  case TargetOpcode::PATCHPOINT:
     if (!Subtarget.is64Bit())
-      report_fatal_error("STATEPOINT is only supported on 64-bit targets");
+      report_fatal_error("STACKMAP, PATCHPOINT and STATEPOINT are only "
+                         "supported on 64-bit targets");
     return emitPatchPoint(MI, BB);
   }
 }

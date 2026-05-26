@@ -256,6 +256,10 @@ unsigned LoongArchInstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
     if (NumBytes == 0)
       NumBytes = 4;
     break;
+  case TargetOpcode::STACKMAP:
+    return StackMapOpers(&MI).getNumPatchBytes();
+  case TargetOpcode::PATCHPOINT:
+    return PatchPointOpers(&MI).getNumPatchBytes();
   }
   return NumBytes;
 }
