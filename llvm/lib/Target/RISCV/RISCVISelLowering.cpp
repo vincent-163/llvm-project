@@ -22233,6 +22233,12 @@ SDValue RISCVTargetLowering::LowerFormalArguments(
   switch (CallConv) {
   default:
     report_fatal_error("Unsupported calling convention");
+  case CallingConv::PreserveAll:
+    if (IsVarArg || !MF.getFunction().getReturnType()->isVoidTy() ||
+        Subtarget.hasStdExtE())
+      report_fatal_error("RISC-V preserve_allcc requires non-variadic void "
+                         "wrappers without RVE; return results through memory");
+    break;
   case CallingConv::C:
   case CallingConv::Fast:
   case CallingConv::SPIR_KERNEL:
@@ -22437,6 +22443,9 @@ bool RISCVTargetLowering::isEligibleForTailCallOptimization(
   auto &Caller = MF.getFunction();
   auto CallerCC = Caller.getCallingConv();
 
+  if (CallerCC == CallingConv::PreserveAll)
+    return false;
+
   // Exception-handling functions need a special set of instructions to
   // indicate a return to the hardware. Tail-calling another function would
   // probably break this.
@@ -22510,6 +22519,19 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   MVT XLenVT = Subtarget.getXLenVT();
 
   MachineFunction &MF = DAG.getMachineFunction();
+
+  if (CallConv == CallingConv::PreserveAll) {
+    if (IsVarArg || !Ins.empty() || Subtarget.hasStdExtE())
+      report_fatal_error("RISC-V preserve_allcc requires non-variadic void "
+                         "wrappers without RVE; return results through memory");
+    if (const auto *Global = dyn_cast<GlobalAddressSDNode>(Callee))
+      if (!Global->getGlobal()->isDSOLocal())
+        report_fatal_error("RISC-V preserve_allcc direct callees must be "
+                           "dso_local to avoid PLT register clobbers");
+    if (isa<ExternalSymbolSDNode>(Callee))
+      report_fatal_error("RISC-V preserve_allcc requires a local or indirect "
+                         "callee, not an external PLT symbol");
+  }
 
   // Analyze the operands of the call, assigning locations to each operand.
   SmallVector<CCValAssign, 16> ArgLocs;

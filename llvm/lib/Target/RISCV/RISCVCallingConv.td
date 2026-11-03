@@ -97,3 +97,16 @@ def CSR_XLEN_F64_V_Interrupt_RVE: CalleeSavedRegs<(sub CSR_XLEN_F64_V_Interrupt,
 def CSR_RT_MostRegs : CalleeSavedRegs<(sub CSR_Interrupt, X6, X7, X28)>;
 def CSR_RT_MostRegs_RVE : CalleeSavedRegs<(sub CSR_RT_MostRegs,
                                                (sequence "X%u", 16, 31))>;
+
+def CSR_PreserveAll : CalleeSavedRegs<(add CSR_Interrupt)>;
+def CSR_XLEN_F32_PreserveAll : CalleeSavedRegs<(add CSR_XLEN_F32_Interrupt)>;
+def CSR_XLEN_F64_PreserveAll : CalleeSavedRegs<(add CSR_XLEN_F64_Interrupt)>;
+class PreserveAllVectorRegs<dag saves> : CalleeSavedRegs<saves> {
+  let OtherPreserved = (add VRM2, VRM4, VRM8, VRN2M1, VRN3M1, VRN4M1,
+                           VRN5M1, VRN6M1, VRN7M1, VRN8M1, VRN2M2,
+                           VRN3M2, VRN4M2, VRN2M4);
+}
+
+def CSR_XLEN_V_PreserveAll : PreserveAllVectorRegs<(add CSR_XLEN_V_Interrupt)>;
+def CSR_XLEN_F32_V_PreserveAll : PreserveAllVectorRegs<(add CSR_XLEN_F32_V_Interrupt)>;
+def CSR_XLEN_F64_V_PreserveAll : PreserveAllVectorRegs<(add CSR_XLEN_F64_V_Interrupt)>;
