@@ -776,6 +776,15 @@ bool SelectionDAGISel::runOnMachineFunction(MachineFunction &mf) {
 
   ISEL_DUMP(dbgs() << "*** MachineFunction at end of ISel ***\n");
   ISEL_DUMP(MF->print(dbgs()));
+  if (MF->getName() == "0x272cc.27" || MF->getName() == "0x224d2.18" ||
+      MF->getName() == "0x816a.16") {
+    unsigned FakeUses = 0;
+    for (const MachineBasicBlock &MBB : *MF)
+      for (const MachineInstr &MI : MBB)
+        FakeUses += MI.isFakeUse();
+    errs() << "COGBT DEBUG ISel fake uses in " << MF->getName() << ": "
+           << FakeUses << "\n";
+  }
 
   return true;
 }
@@ -2515,6 +2524,9 @@ void SelectionDAGISel::Select_UNDEF(SDNode *N) {
 // Use the generic target FAKE_USE target opcode. The chain operand
 // must come last, because InstrEmitter::AddOperand() requires it.
 void SelectionDAGISel::Select_FAKE_USE(SDNode *N) {
+  const StringRef Name = CurDAG->getMachineFunction().getName();
+  if (Name == "0x272cc.27" || Name == "0x224d2.18" || Name == "0x816a.16")
+    errs() << "COGBT DEBUG select fake.use in " << Name << "\n";
   CurDAG->SelectNodeTo(N, TargetOpcode::FAKE_USE, N->getValueType(0),
                        N->getOperand(1), N->getOperand(0));
 }

@@ -7744,6 +7744,10 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
   case Intrinsic::fake_use: {
     Value *V = I.getArgOperand(0);
     SDValue Ops[2];
+    const bool TraceCOGBT816a =
+        DAG.getMachineFunction().getName() == "0x816a.16";
+    const bool HadNode = NodeMap[V].getNode();
+    const bool WasExported = FuncInfo.isExportedInst(V);
     // For Values not declared or previously used in this basic block, the
     // NodeMap will not have an entry, and `getValue` will assert if V has no
     // valid register value.
@@ -7761,8 +7765,22 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
         return getValue(V);
       return SDValue();
     }();
-    if (!FakeUseValue || FakeUseValue.isUndef())
+    if (TraceCOGBT816a) {
+      errs() << "COGBT TRACE 0x816a fake.use node=" << HadNode
+             << " exported=" << WasExported
+             << " resolved=" << static_cast<bool>(FakeUseValue)
+             << " undef=" << (FakeUseValue && FakeUseValue.isUndef())
+             << " value=";
+      V->printAsOperand(errs(), false);
+      errs() << "\n";
+    }
+    if (!FakeUseValue || FakeUseValue.isUndef()) {
+      errs() << "COGBT DEBUG dropped fake.use in "
+             << DAG.getMachineFunction().getName() << ": ";
+      V->print(errs());
+      errs() << "\n";
       return;
+    }
     Ops[0] = getRoot();
     Ops[1] = FakeUseValue;
     // Also, do not translate a fake use with an undef operand, or any other
@@ -10659,6 +10677,26 @@ void SelectionDAGBuilder::visitStackmap(const CallInst &CI) {
 
   SDLoc DL = getCurSDLoc();
   Callee = getValue(CI.getCalledOperand());
+  const bool TraceCOGBT816a = CI.getFunction()->getName() == "0x816a.16";
+
+  if (CI.getFunction()->hasFnAttribute("cogbt-guest-memory-stackmap") &&
+      cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue() == 99999) {
+    for (unsigned Index = 2; Index < CI.arg_size(); ++Index) {
+      const Value *V = CI.getArgOperand(Index);
+      if (!isa<Constant>(V)) {
+        const bool WasExported = FuncInfo.isExportedInst(V);
+        ExportFromCurrentBlock(V);
+        if (TraceCOGBT816a) {
+          errs() << "COGBT TRACE 0x816a stackmap operand " << Index
+                 << " exported=" << WasExported << "->"
+                 << FuncInfo.isExportedInst(V) << " value=";
+          V->printAsOperand(errs(), false);
+          errs() << "\n";
+        }
+      }
+    }
+    getControlRoot();
+  }
 
   // The stackmap intrinsic only records the live variables (the arguments
   // passed to it) and emits NOPS (if requested). Unlike the patchpoint
