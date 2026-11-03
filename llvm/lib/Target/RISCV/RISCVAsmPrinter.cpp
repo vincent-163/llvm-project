@@ -22,12 +22,15 @@
 #include "RISCVRegisterInfo.h"
 #include "TargetInfo/RISCVTargetInfo.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/MachineMemOperand.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
+#include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
@@ -61,6 +64,12 @@ public:
 
 private:
   const RISCVSubtarget *STI;
+  // Guest-memory records waiting for the access they describe to be emitted.
+  // A record may stay pending across a block boundary (see the adjacency scan)
+  // while a later record is created, so this is a queue of (record, access)
+  // pairs rather than a single pending pair.
+  SmallVector<std::pair<const MachineInstr *, const MachineInstr *>, 4>
+      PendingGuestStackMaps;
 
 public:
   explicit RISCVAsmPrinter(TargetMachine &TM,
@@ -130,10 +139,478 @@ private:
 };
 }
 
+// A COGBT guest-memory record is paired with the access it describes, so the
+// access must be a single scalar load or store with one memory operand.  The
+// AOT runtime never decodes the faulting opcode, and a floating-point access
+// names an FP register, which a record built from i64 operands never denotes,
+// so scalar FP accesses are exactly as recoverable as the integer ones.
+static bool isCOGBTRecordableGuestAccess(const MachineInstr &MI) {
+  // One instruction may carry more than one volatile memory operand, e.g. a
+  // single store whose source pair names two guest locations.  The record is
+  // still recoverable: the runtime matches it by exact offset, restores the
+  // recorded guest state and returns to the interpreter to re-execute the
+  // instruction, so every operand of that instruction is handled.  Accept such
+  // an access only when it has at least one memory operand and all of them are
+  // volatile and non-atomic; the opcode fixed by the switch below gives the
+  // access width.
+  if (MI.memoperands_empty())
+    return false;
+  for (const MachineMemOperand *MMO : MI.memoperands())
+    if (!MMO->isVolatile() || MMO->isAtomic())
+      return false;
+  switch (MI.getOpcode()) {
+  case RISCV::LB:
+  case RISCV::LBU:
+  case RISCV::LH:
+  case RISCV::LHU:
+  case RISCV::LW:
+  case RISCV::LWU:
+  case RISCV::LD:
+  case RISCV::SB:
+  case RISCV::SH:
+  case RISCV::SW:
+  case RISCV::SD:
+  case RISCV::FLH:
+  case RISCV::FLW:
+  case RISCV::FLD:
+  case RISCV::FSH:
+  case RISCV::FSW:
+  case RISCV::FSD:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool isCOGBTGuestLoad(const MachineInstr &MI) {
+  switch (MI.getOpcode()) {
+  case RISCV::LB:
+  case RISCV::LBU:
+  case RISCV::LH:
+  case RISCV::LHU:
+  case RISCV::LW:
+  case RISCV::LWU:
+  case RISCV::LD:
+  case RISCV::FLH:
+  case RISCV::FLW:
+  case RISCV::FLD:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool isCOGBTLoadDestination(const MachineInstr &Access, Register Reg,
+                                   const TargetRegisterInfo &TRI) {
+  if (!isCOGBTGuestLoad(Access) || Access.getNumOperands() == 0 ||
+      !Access.getOperand(0).isReg())
+    return false;
+  Register Destination = Access.getOperand(0).getReg();
+  return Destination.isPhysical() && TRI.regsOverlap(Destination, Reg);
+}
+
+static bool isCOGBTRecordedRegisterOverwritten(const MachineInstr &Access,
+                                               Register Reg,
+                                               const TargetRegisterInfo &TRI) {
+  return Access.modifiesRegister(Reg, &TRI) &&
+         !TRI.isConstantPhysReg(Reg) &&
+         !isCOGBTLoadDestination(Access, Reg, TRI);
+}
+
+// A scalar spill into this function's own frame is invisible to the guest: it
+// writes host stack memory rather than guest memory, and it defines no
+// register, so it cannot invalidate a recorded location.  A recorded value's
+// own spill slot cannot be reused for something else before the access either,
+// because the translator keeps every recorded value live past the access.
+// Name the translation unit, the record and the offending instruction so a
+// rejected build points straight at the machine code that has to change.
+[[noreturn]] static void reportCOGBTStackmapError(const char *Reason,
+                                                  const MachineInstr &Stackmap,
+                                                  const MachineInstr *Offender) {
+  std::string Message;
+  raw_string_ostream OS(Message);
+  OS << Reason << " in " << Stackmap.getMF()->getName() << "\n  record: ";
+  Stackmap.print(OS, /*IsStandalone=*/false, /*SkipOpers=*/false,
+                 /*SkipDebugLoc=*/true, /*AddNewLine=*/false);
+  if (Offender) {
+    OS << "\n  offending instruction: ";
+    Offender->print(OS, /*IsStandalone=*/false, /*SkipOpers=*/false,
+                    /*SkipDebugLoc=*/true, /*AddNewLine=*/false);
+  }
+  if (StringRef(Reason) == "COGBT stackmap is missing access-point fake uses" ||
+      StringRef(Reason) ==
+          "COGBT stackmap has no adjacent guest memory instruction" ||
+      StringRef(Reason) ==
+          "COGBT stackmap location is defined before its guest access" ||
+      StringRef(Reason) ==
+          "COGBT guest access overwrites a recorded register") {
+    OS << "\n  machine function:\n";
+    Stackmap.getMF()->print(OS);
+  }
+  report_fatal_error(Twine(Message));
+}
+
+// Walk forward from the start of \p B looking for the guest access a record
+// describes, following side-effect-free unconditional branches the same way
+// the adjacency scan does.  Returns null when no access is reachable within
+// the budget; the caller decides what that means.
+static const MachineInstr *findCOGBTGuestAccessAhead(const MachineBasicBlock *B,
+                                                     unsigned Budget) {
+  for (; B && Budget > 0; --Budget) {
+    bool Hopped = false;
+    for (auto It = B->begin(); It != B->end(); ++It) {
+      if (It->isMetaInstruction())
+        continue;
+      bool VolatileAccess = false;
+      for (const MachineMemOperand *MMO : It->memoperands())
+        VolatileAccess |= MMO->isVolatile();
+      if (VolatileAccess)
+        return &*It;
+      if (It->isTerminator()) {
+        B = (It->isUnconditionalBranch() && !It->hasUnmodeledSideEffects())
+                ? B->getSingleSuccessor()
+                : nullptr;
+        Hopped = true;
+        break;
+      }
+    }
+    if (!Hopped)
+      return nullptr;
+  }
+  return nullptr;
+}
+
+static bool isCOGBTHostFrameSpill(const MachineInstr &MI) {
+  if (!MI.hasOneMemOperand())
+    return false;
+  switch (MI.getOpcode()) {
+  case RISCV::SB:
+  case RISCV::SH:
+  case RISCV::SW:
+  case RISCV::SD:
+  case RISCV::FSH:
+  case RISCV::FSW:
+  case RISCV::FSD:
+    break;
+  default:
+    return false;
+  }
+  const MachineMemOperand *MMO = *MI.memoperands_begin();
+  if (!MMO->isStore() || MMO->isVolatile() || MMO->isAtomic())
+    return false;
+  const PseudoSourceValue *PSV = MMO->getPseudoValue();
+  return PSV && (PSV->kind() == PseudoSourceValue::FixedStack ||
+                 PSV->kind() == PseudoSourceValue::Stack);
+}
+
+struct COGBTFakeUsePath {
+  SmallVector<Register, 8> Registers;
+  SmallVector<unsigned, 8> InterveningCounts;
+  SmallVector<const MachineInstr *, 8> InterveningInstructions;
+};
+
+static bool collectCOGBTFakeUses(
+    const MachineBasicBlock &MBB, MachineBasicBlock::const_iterator Next,
+    unsigned Required, const TargetRegisterInfo &TRI,
+    SmallPtrSetImpl<const MachineBasicBlock *> &Visited,
+    COGBTFakeUsePath &Path) {
+  for (; Next != MBB.end() && Path.Registers.size() < Required; ++Next) {
+    if (Next->isFakeUse()) {
+      if (Next->getNumOperands() != 1 || !Next->getOperand(0).isReg() ||
+          !Next->getOperand(0).getReg().isPhysical() ||
+          Next->getOperand(0).getSubReg())
+        return false;
+      Register Reg = Next->getOperand(0).getReg();
+      if (TRI.isConstantPhysReg(Reg))
+        continue;
+      Path.Registers.push_back(Reg);
+      Path.InterveningCounts.push_back(Path.InterveningInstructions.size());
+      continue;
+    }
+    if (Next->isMetaInstruction())
+      continue;
+    if (Next->getOpcode() == TargetOpcode::STACKMAP)
+      return false;
+    Path.InterveningInstructions.push_back(&*Next);
+  }
+  if (Path.Registers.size() == Required)
+    return true;
+
+  for (const MachineBasicBlock *Successor : MBB.successors()) {
+    if (!Visited.insert(Successor).second)
+      continue;
+    COGBTFakeUsePath SuccessorPath = Path;
+    if (collectCOGBTFakeUses(*Successor, Successor->begin(), Required, TRI,
+                             Visited, SuccessorPath)) {
+      Path = std::move(SuccessorPath);
+      return true;
+    }
+    Visited.erase(Successor);
+  }
+  return false;
+}
+
+// The translator emits one llvm.fake.use immediately after the guest access
+// for every non-constant stackmap operand.  Register allocation can split a
+// value's live range between the stackmap and that access, so the original
+// STACKMAP operand may name a register that has already been reused.  The
+// FAKE_USE operand names the same value after the access.  Retarget register
+// locations to those physical registers, while proving that no instruction
+// between the access and each fake use defines that register.  Unrelated
+// instructions may be scheduled in between; a reload or clobber of the chosen
+// register would mean it was not yet valid when the access faulted.
+static void retargetCOGBTStackmapRegisters(MachineInstr &Stackmap,
+                                           const MachineInstr &Access) {
+  const TargetRegisterInfo *TRI =
+      Stackmap.getMF()->getSubtarget().getRegisterInfo();
+  SmallVector<Register, 8> RecordedRegisters;
+  unsigned NonConstantOperands = 0;
+  for (unsigned Index = StackMapOpers(&Stackmap).getVarIdx();
+       Index < Stackmap.getNumOperands();) {
+    const MachineOperand &Operand = Stackmap.getOperand(Index);
+    if (Operand.isImplicit()) {
+      ++Index;
+      continue;
+    }
+    if (Operand.isReg()) {
+      if (!Operand.getReg().isPhysical() || Operand.getSubReg())
+        reportCOGBTStackmapError(
+            "COGBT stackmap has an unsupported register location", Stackmap,
+            nullptr);
+      RecordedRegisters.push_back(Operand.getReg());
+      ++NonConstantOperands;
+      ++Index;
+      continue;
+    }
+    if (!Operand.isImm())
+      reportCOGBTStackmapError("COGBT stackmap has an unsupported operand",
+                               Stackmap, nullptr);
+    switch (Operand.getImm()) {
+    case StackMaps::DirectMemRefOp:
+      if (Index + 2 >= Stackmap.getNumOperands())
+        reportCOGBTStackmapError("COGBT stackmap has a truncated direct location",
+                                 Stackmap, nullptr);
+      if (!Stackmap.getOperand(Index + 1).isReg() ||
+          !Stackmap.getOperand(Index + 1).getReg().isPhysical() ||
+          Stackmap.getOperand(Index + 1).getSubReg())
+        reportCOGBTStackmapError(
+            "COGBT stackmap has an unsupported direct base register", Stackmap,
+            nullptr);
+      RecordedRegisters.push_back(Stackmap.getOperand(Index + 1).getReg());
+      ++NonConstantOperands;
+      Index += 3;
+      break;
+    case StackMaps::IndirectMemRefOp:
+      if (Index + 3 >= Stackmap.getNumOperands())
+        reportCOGBTStackmapError(
+            "COGBT stackmap has a truncated indirect location", Stackmap,
+            nullptr);
+      if (!Stackmap.getOperand(Index + 2).isReg() ||
+          !Stackmap.getOperand(Index + 2).getReg().isPhysical() ||
+          Stackmap.getOperand(Index + 2).getSubReg())
+        reportCOGBTStackmapError(
+            "COGBT stackmap has an unsupported indirect base register",
+            Stackmap, nullptr);
+      RecordedRegisters.push_back(Stackmap.getOperand(Index + 2).getReg());
+      ++NonConstantOperands;
+      Index += 4;
+      break;
+    case StackMaps::ConstantOp:
+      if (Index + 1 >= Stackmap.getNumOperands())
+        reportCOGBTStackmapError("COGBT stackmap has a truncated constant",
+                                 Stackmap, nullptr);
+      Index += 2;
+      break;
+    default:
+      reportCOGBTStackmapError("COGBT stackmap has an unknown operand tag",
+                               Stackmap, nullptr);
+    }
+  }
+
+  SmallVector<Register, 8> AccessRegisters;
+  COGBTFakeUsePath FakeUsePath;
+  SmallPtrSet<const MachineBasicBlock *, 8> Visited;
+  Visited.insert(Access.getParent());
+  bool HasFakeUsePath =
+      collectCOGBTFakeUses(*Access.getParent(),
+                           std::next(Access.getIterator()),
+                           NonConstantOperands, *TRI, Visited, FakeUsePath);
+  if (!HasFakeUsePath) {
+    // Some legal vector-lowered values have no machine FAKE_USE after the
+    // access: their scalar chunks are folded into constants or the target
+    // DAG cannot materialize the original extract value.  In that case the
+    // original stackmap locations remain exact if no instruction can define
+    // a recorded register between the record and its adjacent access.
+    if (Stackmap.getParent() != Access.getParent())
+      reportCOGBTStackmapError(
+          "COGBT stackmap is missing access-point fake uses", Stackmap,
+          &Access);
+    for (auto It = std::next(Stackmap.getIterator()); It != Access.getIterator();
+         ++It) {
+      if (It->isMetaInstruction())
+        continue;
+      for (Register Reg : RecordedRegisters)
+        if (It->modifiesRegister(Reg, TRI))
+          reportCOGBTStackmapError(
+              "COGBT stackmap location is defined before its guest access",
+              Stackmap, &*It);
+    }
+    for (Register Reg : RecordedRegisters)
+      if (isCOGBTRecordedRegisterOverwritten(Access, Reg, *TRI))
+        reportCOGBTStackmapError(
+            "COGBT guest access overwrites a recorded register", Stackmap,
+            &Access);
+    return;
+  }
+  AccessRegisters = FakeUsePath.Registers;
+
+  for (unsigned I = 0; I < AccessRegisters.size(); ++I)
+    for (unsigned J = 0; J < FakeUsePath.InterveningCounts[I]; ++J)
+      if (FakeUsePath.InterveningInstructions[J]->modifiesRegister(
+              AccessRegisters[I], TRI))
+        reportCOGBTStackmapError(
+            "COGBT access-point register is defined after the guest access",
+            Stackmap, FakeUsePath.InterveningInstructions[J]);
+
+  unsigned AccessRegisterIndex = 0;
+  for (unsigned Index = StackMapOpers(&Stackmap).getVarIdx();
+       Index < Stackmap.getNumOperands();) {
+    MachineOperand &Operand = Stackmap.getOperand(Index);
+    if (Operand.isImplicit()) {
+      ++Index;
+      continue;
+    }
+    if (Operand.isReg()) {
+      Register AccessReg = AccessRegisters[AccessRegisterIndex++];
+      if (isCOGBTRecordedRegisterOverwritten(Access, AccessReg, *TRI))
+        reportCOGBTStackmapError(
+            "COGBT guest access overwrites a recorded register", Stackmap,
+            &Access);
+      Operand.setReg(AccessReg);
+      ++Index;
+      continue;
+    }
+    switch (Operand.getImm()) {
+    case StackMaps::DirectMemRefOp:
+      ++AccessRegisterIndex;
+      Index += 3;
+      break;
+    case StackMaps::IndirectMemRefOp:
+      ++AccessRegisterIndex;
+      Index += 4;
+      break;
+    case StackMaps::ConstantOp:
+      Index += 2;
+      break;
+    default:
+      llvm_unreachable("validated COGBT stackmap operand changed");
+    }
+  }
+  assert(AccessRegisterIndex == AccessRegisters.size() &&
+         "failed to consume COGBT access-point registers");
+}
+
 void RISCVAsmPrinter::LowerSTACKMAP(MCStreamer &OutStreamer, StackMaps &SM,
                                     const MachineInstr &MI) {
   unsigned NOPBytes = STI->hasStdExtZca() ? 2 : 4;
   unsigned NumNOPBytes = StackMapOpers(&MI).getNumPatchBytes();
+
+  if (StackMapOpers(&MI).getID() == 99999 && NumNOPBytes == 0 &&
+      MI.getMF()->getFunction().hasFnAttribute("cogbt-guest-memory-stackmap")) {
+    const TargetRegisterInfo *TRI = STI->getRegisterInfo();
+    // The record and the access it describes are emitted from the same
+    // machine function, but a side-effect-free unconditional branch may sit
+    // between them: the access then lives in the successor block.  Walk such
+    // branches (bounded) instead of rejecting the whole build, and keep
+    // rejecting every other intervening instruction that could change
+    // guest-visible state.
+    const MachineBasicBlock *ScanBlock = MI.getParent();
+    MachineBasicBlock::const_iterator Next = std::next(MI.getIterator());
+    unsigned BlockBudget = 64;
+    for (;;) {
+      bool Hopped = false;
+      for (; Next != ScanBlock->end(); ++Next) {
+        if (Next->isMetaInstruction())
+          continue;
+        bool VolatileAccess = false;
+        for (const MachineMemOperand *MMO : Next->memoperands())
+          VolatileAccess |= MMO->isVolatile();
+        if (VolatileAccess) {
+          if (!isCOGBTRecordableGuestAccess(*Next))
+            reportCOGBTStackmapError(
+                "COGBT stackmap target is not a scalar memory instruction", MI,
+                &*Next);
+          retargetCOGBTStackmapRegisters(const_cast<MachineInstr &>(MI), *Next);
+          for (const auto &Pending : PendingGuestStackMaps) {
+            if (Pending.second != &*Next)
+              continue;
+            // Two records can pair with the same access when several paths
+            // reach one instruction (or when the access instruction carries
+            // several guest locations).  The access describes one guest
+            // access point, so keep the first record and drop the duplicate
+            // instead of failing the whole build.
+            return;
+          }
+          PendingGuestStackMaps.push_back(std::make_pair(&MI, &*Next));
+          return;
+        }
+        // Any terminator ends the basic block: PseudoBR, for instance, is a
+        // terminator without the branch flag, and treating it as an ordinary
+        // instruction let the scan run off the end of the block.
+        if (Next->isTerminator()) {
+          const MachineBasicBlock *Succ = nullptr;
+          const bool Hoppable = !Next->hasUnmodeledSideEffects() &&
+                                !Next->modifiesRegister(RISCV::X2, TRI) &&
+                                BlockBudget > 0;
+          if (Hoppable && Next->isUnconditionalBranch()) {
+            Succ = ScanBlock->getSingleSuccessor();
+          } else if (Hoppable) {
+            // A conditional (or otherwise multi-way) terminator may still sit
+            // between the record and its access: follow it only when exactly
+            // one successor actually leads to a guest access.
+            for (const MachineBasicBlock *Candidate : ScanBlock->successors()) {
+              if (!findCOGBTGuestAccessAhead(Candidate, 64))
+                continue;
+              if (Succ) {
+                Succ = nullptr;
+                break;
+              }
+              Succ = Candidate;
+            }
+          }
+          if (!Succ)
+            reportCOGBTStackmapError(
+                "COGBT stackmap crosses a guest-state side effect", MI, &*Next);
+          --BlockBudget;
+          ScanBlock = Succ;
+          Next = Succ->begin();
+          Hopped = true;
+          break;
+        }
+        if ((Next->mayStore() && !isCOGBTHostFrameSpill(*Next)) ||
+            Next->isCall() || Next->hasUnmodeledSideEffects() ||
+            Next->modifiesRegister(RISCV::X2, TRI))
+          reportCOGBTStackmapError(
+              "COGBT stackmap crosses a guest-state side effect", MI, &*Next);
+      }
+      if (!Hopped) {
+        // The block can also end without a terminator we recognise (an
+        // implicit fallthrough into the layout successor); follow it the same
+        // way before giving up.
+        const MachineBasicBlock *FallThrough =
+            const_cast<MachineBasicBlock *>(ScanBlock)->getFallThrough();
+        if (FallThrough && BlockBudget > 0) {
+          --BlockBudget;
+          ScanBlock = FallThrough;
+          Next = FallThrough->begin();
+          continue;
+        }
+        reportCOGBTStackmapError(
+            "COGBT stackmap has no adjacent guest memory instruction", MI,
+            nullptr);
+      }
+    }
+  }
 
   auto &Ctx = OutStreamer.getContext();
   MCSymbol *MILabel = Ctx.createTempSymbol();
@@ -309,6 +786,17 @@ void RISCVAsmPrinter::emitInstruction(const MachineInstr *MI) {
 
   emitNTLHint(MI);
 
+  for (size_t I = 0; I < PendingGuestStackMaps.size();) {
+    if (PendingGuestStackMaps[I].second != MI) {
+      ++I;
+      continue;
+    }
+    MCSymbol *Label = OutStreamer->getContext().createTempSymbol();
+    OutStreamer->emitLabel(Label);
+    SM.recordStackMap(*Label, *PendingGuestStackMaps[I].first);
+    PendingGuestStackMaps.erase(PendingGuestStackMaps.begin() + I);
+  }
+
   // Do any auto-generated pseudo lowerings.
   if (MCInst OutInst; lowerPseudoInstExpansion(MI, OutInst)) {
     EmitToStreamer(*OutStreamer, OutInst);
@@ -472,6 +960,8 @@ bool RISCVAsmPrinter::emitDirectiveOptionArch() {
 }
 
 bool RISCVAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
+  if (!PendingGuestStackMaps.empty())
+    report_fatal_error("COGBT stackmap target was not emitted");
   STI = &MF.getSubtarget<RISCVSubtarget>();
   RISCVTargetStreamer &RTS =
       static_cast<RISCVTargetStreamer &>(*OutStreamer->getTargetStreamer());
@@ -480,6 +970,8 @@ bool RISCVAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
 
   SetupMachineFunction(MF);
   emitFunctionBody();
+  if (!PendingGuestStackMaps.empty())
+    report_fatal_error("COGBT stackmap target was not emitted");
 
   // Emit the XRay table
   emitXRayTable();

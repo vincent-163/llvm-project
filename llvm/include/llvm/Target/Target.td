@@ -1371,6 +1371,7 @@ def STACKMAP : StandardPseudoInstruction {
   let hasSideEffects = true;
   let isCall = true;
   let mayLoad = true;
+  let mayStore = true;
   let usesCustomInserter = true;
 }
 def PATCHPOINT : StandardPseudoInstruction {

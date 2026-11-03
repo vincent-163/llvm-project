@@ -10660,6 +10660,19 @@ void SelectionDAGBuilder::visitStackmap(const CallInst &CI) {
   SDLoc DL = getCurSDLoc();
   Callee = getValue(CI.getCalledOperand());
 
+  // A COGBT guest-memory record (ID 99999) describes the state at a later
+  // guest access that may be in another block, so export every recorded value
+  // and flush pending exports into the chain before the record.
+  if (CI.getFunction()->hasFnAttribute("cogbt-guest-memory-stackmap") &&
+      cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue() == 99999) {
+    for (unsigned Index = 2; Index < CI.arg_size(); ++Index) {
+      const Value *V = CI.getArgOperand(Index);
+      if (!isa<Constant>(V))
+        ExportFromCurrentBlock(V);
+    }
+    getControlRoot();
+  }
+
   // The stackmap intrinsic only records the live variables (the arguments
   // passed to it) and emits NOPS (if requested). Unlike the patchpoint
   // intrinsic, this won't be lowered to a function call. This means we don't

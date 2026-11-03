@@ -103,6 +103,12 @@ RemoveLoadsIntoFakeUsesPass::run(MachineFunction &MF,
 bool RemoveLoadsIntoFakeUses::run(MachineFunction &MF) {
   // Skip this pass if we would use VarLoc-based LDV, as there may be DBG_VALUE
   // instructions of the restored values that would become invalid.
+  // COGBT guest-memory stackmaps use fake uses as access-point recovery
+  // operands, not as optional debug-only liveness hints.  Removing a reload
+  // together with its fake use would leave the stackmap paired with a guest
+  // access whose recorded register values are no longer available.
+  if (MF.getFunction().hasFnAttribute("cogbt-guest-memory-stackmap"))
+    return false;
   if (!MF.useDebugInstrRef())
     return false;
   // Only run this for functions that have fake uses.
