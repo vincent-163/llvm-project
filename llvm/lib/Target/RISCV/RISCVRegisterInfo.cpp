@@ -22,6 +22,7 @@
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/Support/ErrorHandling.h"
 
 #define GET_REGINFO_TARGET_DESC
@@ -68,8 +69,30 @@ RISCVRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   auto &Subtarget = MF->getSubtarget<RISCVSubtarget>();
   if (MF->getFunction().getCallingConv() == CallingConv::GHC)
     return CSR_NoRegs_SaveList;
-  if (MF->getFunction().getCallingConv() == CallingConv::PreserveNone)
+  if (MF->getFunction().getCallingConv() == CallingConv::PreserveNone) {
+    for (const BasicBlock &Block : MF->getFunction())
+      for (const Instruction &Inst : Block)
+        if (const auto *Call = dyn_cast<CallBase>(&Inst))
+          if (Call->getCallingConv() == CallingConv::PreserveAll)
+            return CSR_IPRA_SaveList;
     return CSR_NoRegs_SaveList;
+  }
+  if (MF->getFunction().getCallingConv() == CallingConv::PreserveAll) {
+    if (Subtarget.hasStdExtE())
+      report_fatal_error("RISC-V preserve_allcc is not supported on RVE");
+    if (Subtarget.hasVInstructions()) {
+      if (Subtarget.hasStdExtD())
+        return CSR_XLEN_F64_V_PreserveAll_SaveList;
+      if (Subtarget.hasStdExtF())
+        return CSR_XLEN_F32_V_PreserveAll_SaveList;
+      return CSR_XLEN_V_PreserveAll_SaveList;
+    }
+    if (Subtarget.hasStdExtD())
+      return CSR_XLEN_F64_PreserveAll_SaveList;
+    if (Subtarget.hasStdExtF())
+      return CSR_XLEN_F32_PreserveAll_SaveList;
+    return CSR_PreserveAll_SaveList;
+  }
   if (MF->getFunction().getCallingConv() == CallingConv::PreserveMost)
     return Subtarget.hasStdExtE() ? CSR_RT_MostRegs_RVE_SaveList
                                   : CSR_RT_MostRegs_SaveList;
@@ -818,6 +841,22 @@ RISCVRegisterInfo::getCallPreservedMask(const MachineFunction & MF,
     return CSR_NoRegs_RegMask;
   if (CC == CallingConv::PreserveNone)
     return CSR_NoRegs_RegMask;
+  if (CC == CallingConv::PreserveAll) {
+    if (Subtarget.hasStdExtE())
+      report_fatal_error("RISC-V preserve_allcc is not supported on RVE");
+    if (Subtarget.hasVInstructions()) {
+      if (Subtarget.hasStdExtD())
+        return CSR_XLEN_F64_V_PreserveAll_RegMask;
+      if (Subtarget.hasStdExtF())
+        return CSR_XLEN_F32_V_PreserveAll_RegMask;
+      return CSR_XLEN_V_PreserveAll_RegMask;
+    }
+    if (Subtarget.hasStdExtD())
+      return CSR_XLEN_F64_PreserveAll_RegMask;
+    if (Subtarget.hasStdExtF())
+      return CSR_XLEN_F32_PreserveAll_RegMask;
+    return CSR_PreserveAll_RegMask;
+  }
   RISCVABI::ABI ABI = Subtarget.getTargetABI();
   if (CC == CallingConv::PreserveMost) {
     if (ABI == RISCVABI::ABI_ILP32E || ABI == RISCVABI::ABI_LP64E)
